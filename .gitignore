@@ -1,0 +1,39 @@
+### --- OS Specific ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.iml
+
+
+### --- Python (Infrastructure / Worker) ---
+# infra 디렉토리 기준
+infra/__pycache__/
+infra/*/__pycache__/
+infra/**/*.py[cod]
+infra/*$py.class
+infra/.venv/
+infra/venv/
+infra/env/
+infra/.env
+infra/.pytest_cache/
+
+# Celery & Persistence
+infra/celerybeat-schedule
+infra/*.log
+
+### --- Docker & Infrastructure ---
+# 로컬 스토리지 및 임시 데이터
+infra/storage/s3/tmp/
+infra/storage/s3/*.mp4
+infra/storage/s3/*.mov
+!infra/storage/s3/test_input.mp4
+
+# Docker logs
+*.log
+docker-compose.override.yml
+
+### --- Common ---
+tmp/
+temp/

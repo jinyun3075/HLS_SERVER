@@ -1,0 +1,114 @@
+services:
+  localstack:
+    image: localstack/localstack
+    volumes:
+      - "./storage/s3/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh"
+      - "./storage/s3/test_long1.mov:/opt/code/localstack/test_long1.mov"
+      - "./storage/s3/test_long2.mov:/opt/code/localstack/test_long2.mov"
+      - "./storage/s3/test_input.mp4:/opt/code/localstack/test_input"
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
+  db:
+    image: postgres:15-alpine
+    container_name: postgres_db
+    environment:
+      - POSTGRES_USER=encoder
+      - POSTGRES_PASSWORD=encoder
+      - POSTGRES_DB=encoder
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  admin:
+    build:
+      context: .
+      dockerfile: ./app/manager/Dockerfile
+    command: uvicorn app.manager.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DATABASE_URL=postgresql://encoder:encoder@db:5432/encoder
+    depends_on:
+      - db
+      - redis
+
+  cdn-mock:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - localstack
+      - admin
+
+  watcher:
+    build:
+      context: .
+      dockerfile: ./app/Dockerfile
+    command: python -m app.watcher.watcher
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 1G
+    depends_on:
+      - db
+      - redis
+      - localstack
+      - admin
+
+  worker_a:
+    build:
+      context: .
+      dockerfile: ./app/Dockerfile
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - WORKER_NAME=worker_1
+      - DB_POOL_SIZE = 5
+      - DB_MAX_OVERFLOW = 5
+    command: celery -A app.worker.celery_app:celery_app worker --loglevel=info -n worker_1@%h -Q celery,worker_1
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          memory: 8G
+    depends_on:
+      - db
+      - redis
+      - admin
+
+  worker_b:
+    build:
+      context: .
+      dockerfile: ./app/Dockerfile
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - WORKER_NAME=worker_2
+      - DB_POOL_SIZE = 5
+      - DB_MAX_OVERFLOW = 5
+    command: celery -A app.worker.celery_app:celery_app worker --loglevel=info -n worker_2@%h -Q celery,worker_2
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 16G
+        reservations:
+          memory: 8G
+    depends_on:
+      - db
+      - redis
+      - admin
+
+volumes:
+  postgres_data:

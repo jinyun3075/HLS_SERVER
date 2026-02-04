@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HLS Encoding Server Monitoring</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- hls.js for HLS playback -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body { background-color: #f8f9fa; }
+        .container { margin-top: 2rem; }
+        .card-header { font-weight: bold; }
+        .table-sm th, .table-sm td { padding: 0.4rem; vertical-align: middle; }
+        .status-badge { font-size: 0.8em; }
+        .progress { height: 20px; font-size: 0.8rem; }
+        .video-filename { cursor: pointer; text-decoration: underline; color: #0d6efd; }
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            padding-top: 56.25%;
+            background-color: #000;
+            overflow: hidden;
+        }
+        .video-wrapper video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transition: opacity 0.5s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mb-4 text-center">HLS Encoding Dashboard</h1>
+
+        <!-- Videos Section -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Videos</span>
+                <button id="upload-btn" class="btn btn-primary btn-sm">Upload Video</button>
+            </div>
+            <div class="card-body">
+                <input type="file" id="video-upload-input" accept="video/*" style="display: none;">
+                <table class="table table-sm table-striped">
+                    <thead>
+                        <tr>
+                            <th>Filename</th>
+                            <th>Status</th>
+                            <th>Created At</th>
+                            <th>Updated At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="videos-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Video Player Section -->
+        <div id="video-player-container" class="card mb-4" style="display: none;">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span id="video-player-header">Now Playing</span>
+                <div class="d-flex align-items-center">
+                    <label for="video-selector" class="me-2">Video:</label>
+                    <select id="video-selector" class="form-select form-select-sm me-3" style="width: auto;"></select>
+                    <label for="quality-selector" class="me-2">Quality:</label>
+                    <select id="quality-selector" class="form-select form-select-sm" style="width: auto;"></select>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div class="video-wrapper">
+                    <video id="video-primary" controls muted playsinline></video>
+                </div>
+            </div>
+        </div>
+
+        <!-- Encoding Jobs Section -->
+        <div class="card mb-4">
+            <div class="card-header">Encoding Jobs</div>
+            <div class="card-body">
+                <table class="table table-sm table-striped">
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Video ID</th>
+                            <th>Status</th>
+                            <th>Progress</th>
+                            <th>Started At</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-table-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Workers Section -->
+        <div class="card">
+            <div class="card-header">Active Workers</div>
+            <div class="card-body">
+                <div id="workers-list" class="row"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const API_BASE_URL = 'http://localhost:8080/api/v1';
+            const HLS_URL  = 'http://localhost:8080/hls';
+            const videoPlayerContainer = document.getElementById('video-player-container');
+            const videoPlayerHeader = document.getElementById('video-player-header');
+            const videoSelector = document.getElementById('video-selector');
+            const qualitySelector = document.getElementById('quality-selector');
+            let activeVideo = document.getElementById('video-primary');
+            const videosTableBody = document.getElementById('videos-table-body');
+            const uploadBtn = document.getElementById('upload-btn');
+            const videoUploadInput = document.getElementById('video-upload-input');
+
+
+            let hls;
+            let allVideos = [];
+
+            // Use event delegation for video clicks. This is more efficient and reliable.
+            videosTableBody.addEventListener('click', (event) => {
+                const target = event.target;
+                // Check if the clicked element is a .video-filename span
+                if (target && target.classList.contains('video-filename')) {
+                    const hlsPath = target.dataset.videoId;
+                    const isPlayerHidden = videoPlayerContainer.style.display === 'none';
+                    if (videoSelector.value !== hlsPath || isPlayerHidden) {
+                        videoSelector.value = hlsPath;
+                        videoSelector.dispatchEvent(new Event('change'));
+                    }
+                }
+            });
+
+            function setupQualitySelector(hlsInstance) {
+                qualitySelector.innerHTML = '<option value="-1">Auto</option>';
+                if (hlsInstance.levels) {
+                    hlsInstance.levels.forEach((level, index) => {
+                        const qualityName = `${level.height}p`;
+                        qualitySelector.innerHTML += `<option value="${index}">${qualityName}</option>`;
+                    });
+                }
+                qualitySelector.value = hlsInstance.currentLevel;
+
+                qualitySelector.onchange = () => {
+                    hlsInstance.currentLevel = parseInt(qualitySelector.value, 10);
+                };
+            }
+
+            async function changeVideoSource(video) {
+                const videoMasterUrl = `${HLS_URL}/${video.hls_path}/master.m3u8`;
+
+                // 1. 다른 영상으로 전환 시 이어볼 수 있도록 현재 재생 시간을 저장합니다.
+                const seekTime = activeVideo.currentTime;
+
+                // 2. hls.js 인스턴스를 파괴하고, 시작 시간을 지정하여 새로 생성합니다.
+                // 이 방법은 플레이어가 처음부터 올바른 세그먼트를 가져오게 하여 더 부드러운 시작을 유도할 수 있습니다.
+                if (hls) {
+                    hls.destroy();
+                }
+
+                hls = new Hls({
+                    lowLatencyMode: true,
+                    // 1초 이상 재생된 경우에만 해당 시간부터 시작하도록 설정합니다.
+                    startPosition: seekTime > 1 ? seekTime : -1
+                });
+
+                // 3. 새 인스턴스에 비디오 소스를 로드하고 미디어 요소에 연결합니다.
+                hls.loadSource(videoMasterUrl);
+                hls.attachMedia(activeVideo);
+
+                // 4. 화질 자동 변경 시 드롭다운 메뉴를 업데이트하는 리스너를 설정합니다.
+                hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+                    if (qualitySelector.value !== "-1") {
+                        qualitySelector.value = data.level;
+                    }
+                });
+
+                // 5. 새 비디오의 정보가 준비되면 화질 선택기를 설정하고 재생을 시작합니다.
+                hls.once(Hls.Events.MANIFEST_PARSED, () => {
+                    setupQualitySelector(hls);
+                    activeVideo.play();
+                });
+
+                videoPlayerHeader.innerText = `Now Playing: ${video.filename}`;
+                videoPlayerContainer.style.display = 'block';
+            }
+
+            videoSelector.addEventListener('change', () => {
+                const selectedHlsPath = videoSelector.value;
+                const videoObject = allVideos.find(v => v.hls_path === selectedHlsPath);
+                if (videoObject) {
+                    changeVideoSource(videoObject);
+                }
+            });
+
+            async function updateVideos() {
+                const data = await fetchData('/videos');
+                if (!data || !data.items) return;
+
+                const newVideos = data.items.sort((a, b) => a.filename.localeCompare(b.filename));
+
+                // Update table
+                videosTableBody.innerHTML = newVideos.map(video => `
+                    <tr>
+                        <td><span class="video-filename" data-video-id="${video.hls_path}">${video.filename}</span></td>
+                        <td>${getStatusBadge(video.status)}</td>
+                        <td>${new Date(video.created_at).toLocaleString()}</td>
+                        <td>${new Date(video.updated_at).toLocaleString()}</td>
+                    </tr>`).join('');
+
+                const videoOptionsChanged = JSON.stringify(newVideos.map(v => v.hls_path)) !== JSON.stringify(allVideos.map(v => v.hls_path));
+                if (videoOptionsChanged) {
+                    allVideos = newVideos;
+                    const currentSelection = videoSelector.value;
+                    videoSelector.innerHTML = allVideos.map(video => `<option value="${video.hls_path}">${video.filename}</option>`).join('');
+                    if (allVideos.some(v => v.hls_path === currentSelection)) {
+                        videoSelector.value = currentSelection;
+                    }
+                }
+            }
+
+            async function handleFileUpload(file) {
+                if (!file) return;
+
+                uploadBtn.disabled = true;
+                uploadBtn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Uploading...`;
+
+                try {
+                    const presignedUrlResponse = await fetch(`${API_BASE_URL}/video/upload`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            filename: file.name,
+                        }),
+                    });
+
+                    if (!presignedUrlResponse.ok) {
+                        const errorData = await presignedUrlResponse.json().catch(() => ({ message: 'Unknown server error' }));
+                        throw new Error(errorData.detail || errorData.message || `HTTP error! status: ${presignedUrlResponse.status}`);
+                    }
+
+                    const { upload_url } = await presignedUrlResponse.json();
+                    const re_host_url = upload_url.replace('localstack:4566','localhost:8080')
+                    const s3UploadResponse = await fetch(re_host_url, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': file.type,
+                        },
+                        body: file,
+                    });
+
+                    if (!s3UploadResponse.ok) {
+                        throw new Error('File upload to S3 failed.');
+                    }
+
+                    alert('Video uploaded successfully! It will now be processed.');
+                    updateVideos();
+
+                } catch (error) {
+                    console.error('Error uploading video:', error);
+                    alert(`Upload failed: ${error.message}`);
+                } finally {
+                    uploadBtn.disabled = false;
+                    uploadBtn.innerText = 'Upload Video';
+                    videoUploadInput.value = '';
+                }
+            }
+
+            uploadBtn.addEventListener('click', () => videoUploadInput.click());
+
+            videoUploadInput.addEventListener('change', (event) => {
+                handleFileUpload(event.target.files[0]);
+            });
+
+            function getStatusBadge(status) {
+                const statusMap = {
+                    'UPLOADED': 'secondary', 'PENDING': 'secondary',
+                    'ENCODING': 'primary',
+                    'COMPLETED': 'success', 'SUCCESS': 'success', 'IDLE': 'success',
+                    'FAILED': 'danger', 'OFFLINE': 'danger',
+                    'BUSY': 'warning',
+                };
+                const badgeClass = statusMap[status] || 'dark';
+                return `<span class="badge bg-${badgeClass} status-badge">${status}</span>`;
+            }
+
+            async function fetchData(endpoint) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}${endpoint}`);
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    return await response.json();
+                } catch (error) {
+                    console.error(`Error fetching ${endpoint}:`, error);
+                    return null;
+                }
+            }
+
+            async function updateJobs() {
+                const data = await fetchData('/jobs'); // Assumes /jobs endpoint exists
+                if (!data || !data.items) return;
+                const tableBody = document.getElementById('jobs-table-body');
+                tableBody.innerHTML = data.items.sort((a, b) => new Date(b.started_at) - new Date(a.started_at)).map(job => `
+                    <tr>
+                        <td>${job.id.substring(0, 8)}...</td>
+                        <td>${job.video_id.substring(0, 8)}...</td>
+                        <td>${getStatusBadge(job.status)}</td>
+                        <td>
+                            <div class="progress">
+                                <div class="progress-bar" role="progressbar" style="width: ${job.progress}%;" aria-valuenow="${job.progress}">${job.progress}%</div>
+                            </div>
+                        </td>
+                        <td>${new Date(job.started_at).toLocaleString()}</td>
+                    </tr>`).join('');
+            }
+
+            async function updateWorkers() {
+                const data = await fetchData('/workers'); // Assumes /workers endpoint exists
+                if (!data || !data.items) return;
+                const workersList = document.getElementById('workers-list');
+                workersList.innerHTML = data.items.sort((a, b) => a.hostname.localeCompare(b.hostname)).map(worker => `
+                    <div class="col-md-4 mb-3">
+                        <div class="card">
+                            <div class="card-body">
+                                <h5 class="card-title">${worker.hostname}</h5>
+                                <p class="card-text mb-1">Status: ${getStatusBadge(worker.status)}</p>
+                                <p class="card-text mb-1">CPU: ${worker.cpu_usage}% | Memory: ${worker.memory_usage}%</p>
+                                <p class="card-text"><small class="text-muted">Last Heartbeat: ${new Date(worker.last_heartbeat).toLocaleString()}</small></p>
+                            </div>
+                        </div>
+                    </div>`).join('');
+            }
+
+            function updateAll() {
+                updateVideos();
+                updateWorkers();
+                updateJobs();
+            }
+
+            updateAll();
+            setInterval(updateAll, 1000);
+        });
+    </script>
+</body>
+</html>
