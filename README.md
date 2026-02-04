@@ -65,9 +65,6 @@ flowchart TB
     DB -->|상태 전달| API
 ```
 
-## 코드
-[GIT 코드](https://github.com/MHT-DEV/VR-SHOWROOM-HLS-TEST/tree/main/infra)
-
 ## 컨테이너 환경
 - localstack(s3):4566
 - redis:6379
