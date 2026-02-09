@@ -1,4 +1,4 @@
-## HLS
+## HLS 통합 테스트
 1. HLS(HTTP Live Streaming): HTTP 기반의 적응형 비트레이트 스트리밍 프로토콜로, 영상을 작은 조각(세그먼트)으로 나눠 일반 웹 서버를 통해 전송합니다.
 2. 비트레이트: 1초당 처리하거나 전송되는 데이터(비트)의 양을 나타내는 수치
 
@@ -155,7 +155,7 @@ flowchart TB
       encode/28dbd38f-ddd9-46a0-a4b2-1f2014e7b3e4.mov/4/0~n.ts
       encode/28dbd38f-ddd9-46a0-a4b2-1f2014e7b3e4.mov/4/index.m3u8
 
-- #### 구조 도식화
+- #### S3 Bucket 구조 도식화
 
     - ``` mermaid
       graph TD
@@ -198,5 +198,48 @@ flowchart TB
 - hls.js 영상 재생
 - 매니페스트를 덮어쓰는 스트리밍 동적 트랙 구현
 
+## 테스트 프로세스
+1. docker-compose.yml이 있는 폴더로 이동 /infra
+2. podman 자원 할당 설정
+```shell
+# 인코딩 자원 할당을 위해 포드맨 설정
+podman machine stop
 
+# podman 자원 8코어 16GB 할당
+podman machine set --cpus 8 --memory 16384
 
+podman machine start
+```
+3. 컨테이너 실행
+```shell
+# 컨테이너 다운
+docker-compose down
+
+# 컨테이너 실행
+docker-compose up --build -d --no-chace
+```
+
+4. 로그창 활성화
+```shell
+# 각 실행 컨테이너 이름 확인 필요
+# 워커, 왓처, 각 서버 로그 활성화
+podman logs infra_admin_1 -f # 모니터링 API 서버 컨테이너
+podman logs infra_watcher_1 -f # 감시자 컨테이너
+podman logs infra_worker_a_1 -f # 작업자1 컨테이너
+podman logs infra_worker_b_1 -f # 작업자2 컨테이너
+
+# S3 터미널 연결
+podman exec -it infra_localstack_1 /bin/bash
+
+# localstack S3 터미널 에서 bucket 확인
+# 업로드 원본 파일 버켓
+awslocal s3 ls s3://upload-bucket/
+
+# hls 인코딩 파일 버켓
+awslocal s3 ls s3://hls-bucket/ --recursive
+```
+
+5. 웹 페이지 확인
+- infra/app/index.html
+- API_BASE_URL, HLS_URL 각 실행 포트에 맞춰 연결(local 환경 default 실행일 경우 현상 유지)
+- Viewer로 오픈
