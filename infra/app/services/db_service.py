@@ -1,4 +1,6 @@
 from contextlib import contextmanager
+from importlib.metadata.diagnose import inspect
+
 from sqlalchemy.orm import Session
 from app.core import Video, Worker, EncodingJob, ENTITY_TYPE
 from app.core.database import SessionLocalApi, SessionLocal
@@ -21,6 +23,12 @@ def session_scope():
         raise
     finally:
         session.close()
+
+def update_job_progress(job_id: str, progress: int):
+    with session_scope() as db:
+        job = db.query(EncodingJob).filter_by(id=job_id).first()
+        if job:
+            job.progress = progress
 
 def select_all_entity(entity_class : Type[ENTITY_TYPE], db: Session = None):
     if db:
@@ -59,12 +67,15 @@ def insert_or_update_job(dto : EncodingJob, db: Session = None):
         return dto
 
 def _perform_insert_or_update(db: Session, model_class, filter_criteria, dto):
-    entity = db.query(model_class).filter_by(**filter_criteria).first()
+    try:
+        entity = db.query(model_class).filter_by(**filter_criteria).first()
+    except Exception:
+        db.rollback()
+        entity = db.query(model_class).filter_by(**filter_criteria).first()
     if entity:
         update_entity(dto, entity)
     else:
-        db.add(dto)
-        entity = dto
+        entity = db.merge(dto)
     db.flush()
     db.refresh(entity)
     return entity

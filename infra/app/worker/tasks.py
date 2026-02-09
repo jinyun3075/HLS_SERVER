@@ -7,7 +7,7 @@ from app.worker.celery_app import celery_app
 from app.worker.redis_app import watch_state
 from app.services.s3_service import S3Service
 from app.services.db_service import (
-    insert_or_update_video, insert_or_update_job, insert_or_update_worker, select_entity, session_scope
+    insert_or_update_video, insert_or_update_job, insert_or_update_worker, select_entity, session_scope, update_job_progress
 )
 
 s3_service = S3Service()
@@ -77,7 +77,6 @@ def encode_hls(s3_upload_video : Video, current_job: EncodingJob, db):
 
         current_job.status = JobStatus.ENCODING
         insert_or_update_job(current_job, db=db)
-        db.commit()
 
         command = convert_default_hls_command(input_local, work_dir)
         process = subprocess.Popen(command, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL, text=True, encoding='utf-8')
@@ -91,11 +90,8 @@ def encode_hls(s3_upload_video : Video, current_job: EncodingJob, db):
                 progress = int((current_time / total_duration) * 100)
                 if progress > last_progress:
                     last_progress = progress
-                    current_job.progress = min(progress, 100)
-                    insert_or_update_job(current_job, db=db)
-                    db.commit()
-
-                    print(f"  [진행률] {current_job.progress}%", flush=True)
+                    update_job_progress(current_job.id, min(progress, 100))
+                    print(f"  [진행률] {min(progress, 100)}%", flush=True)
 
         process.wait()
         master_path = f"{work_dir}/master.m3u8"
@@ -295,30 +291,18 @@ def get_resource():
 
 def update_status(worker, db):
     try:
-        # 자원 측정
         cpu, memory = get_resource()
-
-        # 상태 결정
         status_enum = get_worker_status(cpu, memory)
 
-        # DB용 객체 업데이트
         worker.cpu_usage = cpu
         worker.memory_usage = memory
         worker.status = status_enum
 
-        current_worker_id = None
-        try:
-            saved_worker = insert_or_update_worker(worker, db=db)
-            db.commit()
-            current_worker_id = saved_worker.id
-        except Exception as e:
-            db.rollback()
-            print(f"DB 업데이트 실패 (롤백됨): {e}", flush=True)
-            current_worker_id = getattr(worker, 'id', None)
+        saved_worker = insert_or_update_worker(worker, db=db)
+        current_worker_id = saved_worker.id
 
         status_str = status_enum.value if hasattr(status_enum, 'value') else str(status_enum)
 
-        # 레디스 상태 데이터 업데이트
         redis_data = {
             'cpu': cpu,
             'memory': memory,
@@ -332,14 +316,15 @@ def update_status(worker, db):
         import traceback
         print(f"상태 에러 상세:\n{traceback.format_exc()}", flush=True)
 
+
 def roof_update_status():
     worker = Worker(
-        hostname = Settings.WORKER_NAME,
+        hostname=Settings.WORKER_NAME,
     )
-    with session_scope() as db:
-        while True:
+    while True:
+        with session_scope() as db:
             update_status(worker, db)
-            time.sleep(3)
+        time.sleep(3)
 
 
 @worker_ready.connect
