@@ -1,8 +1,5 @@
 from celery import Celery
 from app.core.config import Settings
-from app.core.database import init_db
-
-init_db()
 
 celery_app = Celery(
     'tasks',

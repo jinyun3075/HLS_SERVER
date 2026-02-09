@@ -318,10 +318,10 @@ def update_status(worker, db):
 
 
 def roof_update_status():
-    worker = Worker(
-        hostname=Settings.WORKER_NAME,
-    )
     while True:
+        worker = Worker(
+            hostname=Settings.WORKER_NAME,
+        )
         with session_scope() as db:
             update_status(worker, db)
         time.sleep(3)
